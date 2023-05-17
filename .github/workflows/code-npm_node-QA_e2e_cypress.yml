@@ -1,0 +1,279 @@
+---
+name: code-node-QA-e2e-cypress
+run-name: "Args: env=${{ inputs.ENV }}, cypress_browser=${{ inputs.CYPRESS_BROWSER }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      CYPRESS_OPTIONS_CONFIGFILE:
+        description: |
+          CYPRESS_OPTIONS_CONFIGFILE: Target environment file for test execution in Cypress 10 or above.
+        required: false
+      ENV:
+        description: |
+          ENV: Target environment for test execution.
+          'DEFAULT' value from config "env".
+        required: false
+        default: 'DEFAULT'
+      CYPRESS_BROWSER:
+        description: |
+          CYPRESS_BROWSER: Browser to use.
+          'DEFAULT' value from config "cypress.browser"
+        required: false
+        type: choice
+        options:
+          - chrome
+          - firefox
+          - electron
+          - DEFAULT
+        default: 'DEFAULT'
+      CYPRESS_OPTIONS_TAGS:
+        description: |
+          CYPRESS_OPTIONS_TAGS: TAGS passed to Cypress.
+          For example: "not @ignore and (@JIRA_KEY-1 or @JIRA_KEY-2)".
+          'DEFAULT' value from config "cypress.options.tags".
+        required: false
+        default: 'DEFAULT'
+      CYPRESS_OPTIONS_SPEC:
+        description: |
+          CYPRESS_OPTIONS_SPEC: Execute only certain features.
+          For example: "cypress/features/login*.feature".
+          'DEFAULT' value from config "cypress.options.spec".
+        required: false
+        default: 'DEFAULT'
+      CYPRESS_OPTIONS_CONFIG:
+        description: |
+          CYPRESS_OPTIONS_CONFIG: Additonal Cypress configurations, comma separated.
+          For example: "viewportWidth=1420,viewportHeight=1080"
+          'DEFAULT' value from config "cypress.options.config".
+        required: false
+        default: 'DEFAULT'
+      CYPRESS_COVERAGE_ENABLED:
+        description: |
+          CYPRESS_COVERAGE_ENABLED: Enables or disables istanbul coverage.
+          Applicable only for "local" env execution.
+          'DEFAULT' value from config "cypress.coverage.enabled".
+        required: false
+        default: 'DEFAULT'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+          - 'DEFAULT'
+      XRAY_TESTPLANID:
+        description: |
+          XRAY_TESTPLANID: Jira issue to be used as xray test plan.
+          'DEFAULT' value from config "xray.testplanid".
+        required: false
+        default: 'DEFAULT'
+      XRAY_ASSIGNEE:
+        description: |
+          XRAY_ASSIGNEE: JIRA User to assign to the executions.
+          'DEFAULT' value from config "xray.assignee".
+        required: false
+        default: 'DEFAULT'
+
+env:
+  WORKFLOW_VERSION: 2.1.0
+  CYPRESS_ROOT_FOLDER: "code/config_test/e2e/definitions/cypress"
+  NEW_CYPRESS_ROOT_FOLDER: "lego/e2e/definitions/cypress"
+
+jobs:
+  check-cypress-folder-existence:
+    name: Check cypress folder existence
+    runs-on: ubuntu-20.04
+    outputs:
+      folder_exists: ${{ steps.check_cypress_folder.outputs.folder_exists }}
+      cypress_folder: ${{ steps.check_cypress_folder.outputs.cypress_folder }}
+    steps:
+      - name: Check folder existence
+        id: check_cypress_folder
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh api "repos/${{ github.repository }}/contents/$NEW_CYPRESS_ROOT_FOLDER?ref=${{ github.ref }}" > /dev/null 2>&1; then
+            echo "cypress_folder=$NEW_CYPRESS_ROOT_FOLDER" >> "$GITHUB_OUTPUT"
+            echo "folder_exists=true" >> "$GITHUB_OUTPUT"
+          elif gh api "repos/${{ github.repository }}/contents/$CYPRESS_ROOT_FOLDER?ref=${{ github.ref }}" > /dev/null 2>&1; then
+            echo "cypress_folder=$CYPRESS_ROOT_FOLDER" >> "$GITHUB_OUTPUT"
+            echo "folder_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "folder_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  e2e-cypress-tests:
+    name: E2E Cypress Tests
+    needs: check-cypress-folder-existence
+    if: needs.check-cypress-folder-existence.outputs.folder_exists == 'true'
+    timeout-minutes: 60
+    runs-on: [self-hosted, testing-ivm]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Check where config_test is
+        id: check-where-config-test-is
+        run: |
+          if [[ -f "code/config_test/config_test.yml" ]]; then
+            echo "CONFIG_FILE_FOUND=code/config_test/config_test.yml"
+            echo "config-test-directory=code/config_test/config_test.yml" >> "$GITHUB_OUTPUT"
+          elif [[ -f "config_test.yml" ]]; then
+            echo "CONFIG_FILE_FOUND=config_test.yml"
+            echo "config-test-directory=config_test.yml" >> "$GITHUB_OUTPUT"
+          else
+            echo "CONFIG_FILE_NOT_FOUND"
+          fi
+
+      - name: Setup IVM environment
+        uses: inditex/gha-ivmactions/setup-environment@v0
+        with:
+          tool-versions-directory: code
+
+      - name: Resolve Configuration
+        id: config
+        uses: inditex/actions/resolvers/config-resolver@main
+        with:
+          create-annotations: true
+          files: |
+            application.yml
+            code/config_test/platform.yml
+            code/config_test/platform_test.yml
+            ${{ steps.check-where-config-test-is.outputs.config-test-directory }}
+          input-vars: "${{ toJSON(github.event.inputs) }}"
+
+      - name: Resolve credentials
+        uses: inditex/actions/resolvers/creds-resolver@main
+        with:
+          path-to-secrets: code/config_test/secret_test.yml
+          output-format: kvequal
+          output-separator: comma
+
+      - name: Perses up to run pods
+        if: ${{ fromJSON(steps.config.outputs.config).env == 'local' }}
+        run: |
+          perses up --testType "e2e" --workingDir ${{ github.workspace }}/code
+
+      - name: NPM / Environment setup
+        run: |
+          echo "${NODE_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Start application (local)
+        if: ${{ fromJSON(steps.config.outputs.config).env == 'local' }}
+        id: start-node-app
+        uses: inditex/actions/testing/start-node-application@main
+        env:
+          COVERAGE_ENABLED: '${{ fromJSON(steps.config.outputs.config).cypress.coverage.enabled }}'
+        with:
+          working-directory: ${{ github.workspace }}/code
+          npm-target: ${{ fromJSON(steps.config.outputs.config).app.npm.target }}
+          npm-install: ${{ fromJSON(steps.config.outputs.config).app.npm.install }}
+          wait-for-app: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.enabled }}
+          healthcheck-url: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.url }}
+          healthcheck-wait-ms: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.wait }}
+          app-log-file: ${{ github.workspace }}/app_run.log
+
+      - name: Install cypress npm dependencies
+        working-directory: ${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}
+        run: |
+          npm install
+
+      - name: Run e2e cypress tests with cypress-io
+        uses: cypress-io/github-action@v4.2.0
+        env:
+          COVERAGE_ENABLED: '${{ fromJSON(steps.config.outputs.config).cypress.coverage.enabled }}'
+        with:
+          working-directory: ${{ github.workspace }}/${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}
+          install: false
+          env: configFile=${{ fromJSON(steps.config.outputs.config).env }},${{ env.CREDS }},ENV=${{ fromJSON(steps.config.outputs.config).env }},TAGS="${{ fromJSON(steps.config.outputs.config).cypress.options.tags }}"
+          browser: ${{ fromJSON(steps.config.outputs.config).cypress.browser }}
+          spec: ${{ fromJSON(steps.config.outputs.config).cypress.options.spec }}
+          config: ${{ fromJSON(steps.config.outputs.config).cypress.options.config }}
+          config-file: ${{ fromJSON(steps.config.outputs.config).cypress.options.configfile }}
+
+      - name: Stop running application (Local)
+        if: ${{ always() && fromJSON(steps.config.outputs.config).env == 'local' && steps.start-node-app.outputs.pid != null}}
+        continue-on-error: true
+        run: |
+          kill ${{ steps.start-node-app.outputs.pid }}
+
+      - name: Perses down to clean environment
+        if: ${{ always() && fromJSON(steps.config.outputs.config).env == 'local' }}
+        continue-on-error: true
+        run: |
+          perses logs --testType "e2e" --workingDir ${{ github.workspace }}/code
+          perses down --testType "e2e" --workingDir ${{ github.workspace }}/code
+
+      - name: Generate mochawesome report
+        if: ${{ always() && !cancelled() && fromJSON(steps.config.outputs.config).cypress.results.mochawesome_json_folder.path != null && fromJSON(steps.config.outputs.config).cypress.results.mochawesome_report_folder.path != null }}
+        continue-on-error: true
+        working-directory: ${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}
+        run: |
+          # shellcheck disable=SC2001
+          mochawesome_json_folder=$(sed -e "s|${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}/||g" <<< ${{ fromJSON(steps.config.outputs.config).cypress.results.mochawesome_json_folder.path }})
+          # shellcheck disable=SC2001
+          mochawesome_report_folder=$(sed -e "s|${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}/||g" <<< ${{ fromJSON(steps.config.outputs.config).cypress.results.mochawesome_report_folder.path }})
+          ./node_modules/.bin/generate-mochawesome-report --saveJson --jsonDir "$mochawesome_json_folder" -o "$mochawesome_report_folder"
+
+      - name: Create Cucumber report for Xray
+        if: ${{ always() && !cancelled() && fromJSON(steps.config.outputs.config).cypress.results.cucumber_folder.path != null && fromJSON(steps.config.outputs.config).cypress.results.cucumber_xray_file.path != null }}
+        continue-on-error: true
+        working-directory: ${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}
+        run: |
+          # shellcheck disable=SC2001
+          cucumber_folder=$(sed -e "s|${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}/||g" <<< ${{ fromJSON(steps.config.outputs.config).cypress.results.cucumber_folder.path }})
+          # shellcheck disable=SC2001
+          cucumber_xray_file=$(sed -e "s|${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}/||g" <<< ${{ fromJSON(steps.config.outputs.config).cypress.results.cucumber_xray_file.path }})
+          ./node_modules/.bin/cucumber-json-merge -d "$cucumber_folder" -o "$cucumber_xray_file"
+
+      - name: Display results
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        uses: inditex/actions/testing/results-summary-annotations@main
+        with:
+          path: ${{ steps.check-where-config-test-is.outputs.config-test-directory }}
+          keys: cypress
+
+      - name: Attach results
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        uses: inditex/actions/upload-artifact@main
+        with:
+          path: ${{ steps.check-where-config-test-is.outputs.config-test-directory }}
+          keys: cypress
+
+      - name: Publish E2E test results to XRAY
+        if: ${{ always() && !cancelled() && fromJSON(steps.config.outputs.config).xray.testplanid && fromJSON(steps.config.outputs.config).cypress.results.cucumber_folder.path != null && fromJSON(steps.config.outputs.config).cypress.results.cucumber_xray_file.path != null }}
+        uses: inditex/actions/testing/xray-reporter@main
+        continue-on-error: true
+        with:
+          path: ${{ github.workspace }}/${{ fromJSON(steps.config.outputs.config).cypress.results.cucumber_xray_file.path }}
+          test-plan-id: ${{ fromJSON(steps.config.outputs.config).xray.testplanid }}
+          jira-username: ${{ secrets.SRVC_E2ETEST_USERNAME }}
+          jira-password: ${{ secrets.SRVC_E2ETEST_PASSWORD }}
+          assignee: ${{ fromJSON(steps.config.outputs.config).xray.assignee }}
+          description: "${{ fromJSON(steps.config.outputs.config).metadata.project_key }}-${{github.workflow}}-${{ github.run_number }}-${{ fromJSON(steps.config.outputs.config).env }}-${{ fromJSON(steps.config.outputs.config).cypress.browser }}"
+          testEnvironments: ${{ fromJSON(steps.config.outputs.config).env }}
+
+      - name: Publish E2E test results to DEVINS
+        if: ${{ always() && !cancelled() && fromJSON(steps.config.outputs.config).cypress.results.mochawesome_report_folder.path != null }}
+        run: |
+          adam publishE2ETest \
+            --projectKey="${{ fromJSON(steps.config.outputs.config).metadata.project_key }}" \
+            --workingDir="${{ github.workspace }}/${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}" \
+            --testType="CYPRESS" \
+            --reportPath="${{ github.workspace }}/${{ fromJSON(steps.config.outputs.config).cypress.results.mochawesome_report_folder.path }}/index.json" \
+            --lcovCypressPath="${{ github.workspace }}/${{ fromJSON(steps.config.outputs.config).cypress.results.coverage_istanbul_file.path }}"
+
+      - name: Create a Workflow Status Check to link this execution with a PR
+        if: always() && !cancelled() && github.event_name == 'workflow_dispatch'
+        uses: inditex/actions/create-status-check@main
+        with:
+          app_id: ${{ vars.WFSC_APP_ID }}
+          app_private_key: ${{ secrets.WFSC_APP_PKEY }}
+          name: "code-QA-e2e-cypress-${{ fromJSON(steps.config.outputs.config).env }}"
+          summary: |
+            This status check represents the conclusion (__${{ job.status }}__) of the last dispatched execution of workflow:
+            `${{ github.workflow_ref }}`
+
+            You can find more details in the link below :arrow_down:
