@@ -125,6 +125,42 @@ jobs:
             echo "CONFIG_FILE_NOT_FOUND"
           fi
 
+      - name: Setup IVM environment
+        uses: inditex/gha-ivmactions/setup-environment@v0
+        with:
+          tool-versions-directory: code
+
+      - name: Resolve credentials
+        uses: inditex/actions/resolvers/creds-resolver@main
+        with:
+          path-to-secrets: code/config_test/secret_test.yml
+          output-format: kvequal
+          output-separator: comma
+
+      - name: Perses up to run pods
+        if: ${{ fromJSON(steps.config.outputs.config).env == 'local' }}
+        run: |
+          perses up --testType "e2e" --workingDir ${{ github.workspace }}/code
+
+      - name: NPM / Environment setup
+        run: |
+          echo "${NODE_HOME}/bin" >> "$GITHUB_PATH"
+
+      - name: Start application (local)
+        if: ${{ fromJSON(steps.config.outputs.config).env == 'local' }}
+        id: start-node-app
+        uses: inditex/actions/testing/start-node-application@main
+        env:
+          COVERAGE_ENABLED: '${{ fromJSON(steps.config.outputs.config).cypress.coverage.enabled }}'
+        with:
+          working-directory: ${{ github.workspace }}/code
+          npm-target: ${{ fromJSON(steps.config.outputs.config).app.npm.target }}
+          npm-install: ${{ fromJSON(steps.config.outputs.config).app.npm.install }}
+          wait-for-app: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.enabled }}
+          healthcheck-url: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.url }}
+          healthcheck-wait-ms: ${{ fromJSON(steps.config.outputs.config).app.npm.health_check.wait }}
+          app-log-file: ${{ github.workspace }}/app_run.log
+
       - name: Install cypress npm dependencies
         working-directory: ${{ needs.check-cypress-folder-existence.outputs.cypress_folder }}
         run: |
