@@ -130,18 +130,6 @@ jobs:
         with:
           tool-versions-directory: code
 
-      - name: Resolve Configuration
-        id: config
-        uses: inditex/actions/resolvers/config-resolver@main
-        with:
-          create-annotations: true
-          files: |
-            application.yml
-            code/config_test/platform.yml
-            code/config_test/platform_test.yml
-            ${{ steps.check-where-config-test-is.outputs.config-test-directory }}
-          input-vars: "${{ toJSON(github.event.inputs) }}"
-
       - name: Resolve credentials
         uses: inditex/actions/resolvers/creds-resolver@main
         with:
