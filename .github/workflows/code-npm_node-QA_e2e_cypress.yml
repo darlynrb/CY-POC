@@ -107,7 +107,7 @@ jobs:
     needs: check-cypress-folder-existence
     if: needs.check-cypress-folder-existence.outputs.folder_exists == 'true'
     timeout-minutes: 60
-    runs-on: [self-hosted, testing-ivm]
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v3
